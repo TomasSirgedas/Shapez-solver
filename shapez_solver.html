@@ -1,0 +1,1226 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+body {
+  font-family: Arial;
+}
+.hidden {
+   display: none;
+}
+</style>
+</head>
+<body>
+
+
+<h3><p>Shapez.io solver</p></h3>
+<p><input type="text" id="code" value="--Ry--Rr:SgRgSyCu" size="40"><br><br><p>
+<!-- <p><input type="text" id="code" value="----Ry--"><br><br><p> -->
+<div id="error" class="hasError"></div>
+<div id="resultWrapper">
+    <canvas id="result" width="128" height="128"></canvas>
+</div>
+
+<p id="download_status">... still downloading ...</p>
+<button onclick="onSolveButtonPressed()">Solve</button>
+
+<div id="resultsDiv" class="hidden">
+<div id="diagramDiv"></div>
+<button onclick='copyBluePrintToClipboard();'>copy Blueprint to clipboard</button>
+(requires FatcatX's <a href="https://shapez.mod.io/blueprint-strings">Blueprint Strings</a> mod to paste in game)
+<p id="recipeTreeText" style="white-space: pre; font-family: Consolas;"></p>
+</div>
+
+<div id="impossibleDiv" class="hidden">
+<h3 id="impossibleText">impossible!</h3>
+</div>
+
+<p id="demo"></p>
+
+<script>
+
+// from https://viewer.shapez.io/
+
+/*
+ * Lots of code here is copied 1:1 from actual game files
+ *
+ */
+
+const maxLayer = 4;
+
+/** @enum {string} */
+const enumSubShape = {
+  rect: "rect",
+  circle: "circle",
+  star: "star",
+  windmill: "windmill",
+};
+
+/** @enum {string} */
+const enumSubShapeToShortcode = {
+  [enumSubShape.rect]: "R",
+  [enumSubShape.circle]: "C",
+  [enumSubShape.star]: "S",
+  [enumSubShape.windmill]: "W",
+};
+
+/** @enum {enumSubShape} */
+const enumShortcodeToSubShape = {};
+for (const key in enumSubShapeToShortcode) {
+  enumShortcodeToSubShape[enumSubShapeToShortcode[key]] = key;
+}
+
+const arrayQuadrantIndexToOffset = [
+  { x: 1, y: -1 }, // tr
+  { x: 1, y: 1 }, // br
+  { x: -1, y: 1 }, // bl
+  { x: -1, y: -1 }, // tl
+];
+
+// From colors.js
+/** @enum {string} */
+const enumColors = {
+  red: "red",
+  green: "green",
+  blue: "blue",
+
+  yellow: "yellow",
+  purple: "purple",
+  cyan: "cyan",
+
+  white: "white",
+  uncolored: "uncolored",
+};
+
+/** @enum {string} */
+const enumColorToShortcode = {
+  [enumColors.red]: "r",
+  [enumColors.green]: "g",
+  [enumColors.blue]: "b",
+
+  [enumColors.yellow]: "y",
+  [enumColors.purple]: "p",
+  [enumColors.cyan]: "c",
+
+  [enumColors.white]: "w",
+  [enumColors.uncolored]: "u",
+};
+
+/** @enum {string} */
+const enumColorsToHexCode = {
+  [enumColors.red]: "#ff666a",
+  [enumColors.green]: "#78ff66",
+  [enumColors.blue]: "#66a7ff",
+
+  // red + green
+  [enumColors.yellow]: "#fcf52a",
+
+  // red + blue
+  [enumColors.purple]: "#dd66ff",
+
+  // blue + green
+  [enumColors.cyan]: "#87fff5",
+
+  // blue + green + red
+  [enumColors.white]: "#ffffff",
+
+  [enumColors.uncolored]: "#aaaaaa",
+};
+
+/** @enum {enumColors} */
+const enumShortcodeToColor = {};
+for (const key in enumColorToShortcode) {
+  enumShortcodeToColor[enumColorToShortcode[key]] = key;
+}
+
+CanvasRenderingContext2D.prototype.beginCircle = function (x, y, r) {
+  if (r < 0.05) {
+    this.beginPath();
+    this.rect(x, y, 1, 1);
+    return;
+  }
+  this.beginPath();
+  this.arc(x, y, r, 0, 2.0 * Math.PI);
+};
+
+const possibleShapesString = Object.keys(enumShortcodeToSubShape).join("");
+const possibleColorsString = Object.keys(enumShortcodeToColor).join("");
+const layerRegex = new RegExp(
+  "([" + possibleShapesString + "][" + possibleColorsString + "]|-{2}){4}"
+);
+
+/////////////////////////////////////////////////////
+
+function radians(degrees) {
+  return (degrees * Math.PI) / 180.0;
+}
+
+/**
+ * Generates the definition from the given short key
+ */
+function fromShortKey(key) {
+  const sourceLayers = key.split(":");
+  if (sourceLayers.length > maxLayer) {
+    throw new Error("Only " + maxLayer + " layers allowed");
+  }
+
+  let layers = [];
+  for (let i = 0; i < sourceLayers.length; ++i) {
+    const text = sourceLayers[i];
+    if (text.length !== 8) {
+      throw new Error("Invalid layer: '" + text + "' -> must be 8 characters");
+    }
+
+    if (text === "--".repeat(4)) {
+      throw new Error("Empty layers are not allowed");
+    }
+
+    if (!layerRegex.test(text)) {
+      throw new Error("Invalid syntax in layer " + (i + 1));
+    }
+
+    const quads = [null, null, null, null];
+    for (let quad = 0; quad < 4; ++quad) {
+      const shapeText = text[quad * 2 + 0];
+      const subShape = enumShortcodeToSubShape[shapeText];
+      const color = enumShortcodeToColor[text[quad * 2 + 1]];
+      if (subShape) {
+        if (!color) {
+          throw new Error("Invalid shape color key: " + key);
+        }
+        quads[quad] = {
+          subShape,
+          color,
+        };
+      } else if (shapeText !== "-") {
+        throw new Error("Invalid shape key: " + shapeText);
+      }
+    }
+    layers.push(quads);
+  }
+
+  return layers;
+}
+
+function renderShapeToResultDiv(layers, size) {
+  const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById(
+    "result"
+  ));
+  const context = canvas.getContext("2d");
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  renderShape( context, layers, new XY( size/2, size/2 ), size );
+}
+
+function renderShape(context, layers, pos, size) {
+  context.save();
+  context.fillStyle = "#fff";
+
+  const dpi = 1;
+  //context.fillRect(0, 0, w, h);
+
+  context.translate( pos.x, pos.y );
+  context.scale((dpi) / 24 * (size), (dpi) / 24 * (size));
+
+  context.fillStyle = "#e9ecf7";
+
+  const quadrantSize = 10;
+  const quadrantHalfSize = quadrantSize / 2;
+
+  context.fillStyle = "rgba(40, 50, 65, 0.1)";
+  context.beginCircle(0, 0, quadrantSize * 1.15);
+  context.fill();
+
+  for (let layerIndex = 0; layerIndex < layers.length; ++layerIndex) {
+    const quadrants = layers[layerIndex];
+
+    const layerScale = Math.max(0.1, 0.9 - layerIndex * 0.22);
+
+    for (let quadrantIndex = 0; quadrantIndex < 4; ++quadrantIndex) {
+      if (!quadrants[quadrantIndex]) {
+        continue;
+      }
+      const { subShape, color } = quadrants[quadrantIndex];
+
+      const quadrantPos = arrayQuadrantIndexToOffset[quadrantIndex];
+      const centerQuadrantX = quadrantPos.x * quadrantHalfSize;
+      const centerQuadrantY = quadrantPos.y * quadrantHalfSize;
+
+      const rotation = radians(quadrantIndex * 90);
+
+      context.translate(centerQuadrantX, centerQuadrantY);
+      context.rotate(rotation);
+
+      context.fillStyle = enumColorsToHexCode[color];
+      context.strokeStyle = "#555";
+      context.lineWidth = 1;
+
+      const insetPadding = 0.0;
+
+      switch (subShape) {
+        case enumSubShape.rect: {
+          context.beginPath();
+          const dims = quadrantSize * layerScale;
+          context.rect(
+            insetPadding + -quadrantHalfSize,
+            -insetPadding + quadrantHalfSize - dims,
+            dims,
+            dims
+          );
+
+          break;
+        }
+        case enumSubShape.star: {
+          context.beginPath();
+          const dims = quadrantSize * layerScale;
+
+          let originX = insetPadding - quadrantHalfSize;
+          let originY = -insetPadding + quadrantHalfSize - dims;
+
+          const moveInwards = dims * 0.4;
+          context.moveTo(originX, originY + moveInwards);
+          context.lineTo(originX + dims, originY);
+          context.lineTo(originX + dims - moveInwards, originY + dims);
+          context.lineTo(originX, originY + dims);
+          context.closePath();
+          break;
+        }
+
+        case enumSubShape.windmill: {
+          context.beginPath();
+          const dims = quadrantSize * layerScale;
+
+          let originX = insetPadding - quadrantHalfSize;
+          let originY = -insetPadding + quadrantHalfSize - dims;
+          const moveInwards = dims * 0.4;
+          context.moveTo(originX, originY + moveInwards);
+          context.lineTo(originX + dims, originY);
+          context.lineTo(originX + dims, originY + dims);
+          context.lineTo(originX, originY + dims);
+          context.closePath();
+          break;
+        }
+
+        case enumSubShape.circle: {
+          context.beginPath();
+          context.moveTo(
+            insetPadding + -quadrantHalfSize,
+            -insetPadding + quadrantHalfSize
+          );
+          context.arc(
+            insetPadding + -quadrantHalfSize,
+            -insetPadding + quadrantHalfSize,
+            quadrantSize * layerScale,
+            -Math.PI * 0.5,
+            0
+          );
+          context.closePath();
+          break;
+        }
+
+        default: {
+          assertAlways(false, "Unkown sub shape: " + subShape);
+        }
+      }
+
+      context.fill();
+      context.stroke();
+
+      context.rotate(-rotation);
+      context.translate(-centerQuadrantX, -centerQuadrantY);
+    }
+  }
+
+  context.restore();
+}
+
+/////////////////////////////////////////////////////
+
+function showError(msg) {
+  const errorDiv = document.getElementById("error");
+  errorDiv.classList.toggle("hasError", !!msg);
+  if (msg) {
+    errorDiv.innerText = msg;
+  } else {
+    errorDiv.innerText = "Shape generated";
+  }
+}
+
+//// @ts-ignore
+//window.generate = () => {
+//  showError(null);
+//  // @ts-ignore
+//  const code = document.getElementById("code").value.trim();
+//
+//  let parsed = null;
+//  try {
+//    parsed = fromShortKey(code);
+//  } catch (ex) {
+//    showError(ex);
+//    return;
+//  }
+//
+//  renderShape(parsed);
+//};
+
+//// @ts-ignore
+//window.debounce = (fn) => {
+//  setTimeout(fn, 0);
+//};
+
+//// @ts-ignore
+//window.addEventListener("load", () => {
+//  if (window.location.search) {
+//    var key = window.location.search.substr(1);
+//    if (key.indexOf(".") >= 0) {
+//      key = key.replace(/\./gi, ":");
+//    }
+//    document.getElementById("code").value = key;
+//  }
+//  generate();
+//});
+
+//window.exportShape = () => {
+//  const canvas = document.getElementById("result");
+//  const imageURL = canvas.toDataURL("image/png");
+//
+//  const dummyLink = document.createElement("a");
+//  dummyLink.download = "shape.png";
+//  dummyLink.href = imageURL;
+//  dummyLink.dataset.downloadurl = [
+//    "image/png",
+//    dummyLink.download,
+//    dummyLink.href,
+//  ].join(":");
+//
+//  document.body.appendChild(dummyLink);
+//  dummyLink.click();
+//  document.body.removeChild(dummyLink);
+//};
+
+//window.viewShape = (key) => {
+//  document.getElementById("code").value = key;
+//  generate();
+//};
+
+//window.shareShape = () => {
+//  const code = document.getElementById("code").value.trim();
+//  const url = "https://viewer.shapez.io?" + code.replace(/:/gi, ".");
+//  alert("You can share this url: " + url);
+//};
+
+//function getRandomInt(max) {
+//  return Math.floor(Math.random() * Math.floor(max));
+//}
+//
+//function getRandomShape() {
+//  let shapes = Object.values(enumSubShapeToShortcode);
+//  shapes.push("-");
+//  return shapes[getRandomInt(shapes.length)];
+//}
+//
+//function getRandomColor() {
+//  return Object.values(enumColorToShortcode)[
+//    getRandomInt(Object.keys(enumColorToShortcode).length)
+//  ];
+//}
+
+//window.randomShape = () => {
+//  let layers = getRandomInt(maxLayer);
+//  let code = "";
+//  for (var i = 0; i <= layers; i++) {
+//    let layertext = "";
+//    for (var y = 0; y <= 3; y++) {
+//      let randomShape = getRandomShape();
+//      let randomColor = getRandomColor();
+//
+//      if (randomShape === "-") {
+//        randomColor = "-";
+//        console.log("in");
+//      }
+//      layertext = layertext + randomShape + randomColor;
+//    }
+//    //empty layer not allowed
+//    if (layertext === "--------") {
+//      i--;
+//    } else {
+//      code = code + layertext + ":";
+//    }
+//  }
+//  code = code.replace(/:+$/, "");
+//  document.getElementById("code").value = code;
+//  generate();
+//};
+
+
+
+
+
+
+
+
+
+
+
+// -- Tom Sirgedas code -- public domain --
+
+class Layer {
+  constructor(b) {
+    this.b = b;
+  }
+  // Getter
+  get area() {
+    return this.calcArea();
+  }
+  isEmpty() { return this.b == 0; }
+  rotated() { return ((this.b<<1)&15) | ((this.b&8) ? 1 : 0); }
+  flipped() { return Layer((this.b&5) | ((this.b&8) ? 2 : 0) | ((this.b&2) ? 8 : 0)); }
+  str() { var s = ""; for ( var i = 0; i < 4; i++ ) s += this.b & (1<<i) ? "Cu" : "--"; return s; }
+  cutRight() { return Layer(this.b & 3); }
+  cutLeft() { return Layer(this.b & 12); }
+  intersects( rhs ) { return (this.b & rhs.b) != 0; }
+}
+
+class Shape
+{
+   constructor()
+   {
+      this.layers = [new Layer(0), new Layer(0), new Layer(0), new Layer(0)];
+   }
+   numLayers() { for ( var i = 3; i >= 0; i-- ) if ( !this.layers[i].isEmpty() ) return i+1; return 0; }
+   str() { var s = ""; for ( var i = 0; i < this.numLayers(); i++ ) { if (i) s += ":"; s += this.layers[i].str(); } return s; }
+   rotated() { var ret = new Shape(); for ( var i = 0; i < 4; i++ ) ret.layers[i] = this.layers[i].rotated(); return ret; }
+   flipped() { var ret = new Shape();for ( var i = 0; i < 4; i++ ) ret.layers[i] = this.layers[i].flipped(); return ret; }
+   withEmptyLayersCollapsed() { var ret = new Shape(); var k = 0; for ( var i = 0; i < 4; i++ ) { ret.layers[k] = this.layers[i]; k += !ret.layers[k].isEmpty(); } return ret; }
+   cutRight() { var ret = new Shape(); for ( var i = 0; i < 4; i++ ) ret.layers[i] = this.layers[i].cutRight(); return ret.withEmptyLayersCollapsed(); }
+   cutLeft() { var ret = new Shape(); for ( var i = 0; i < 4; i++ ) ret.layers[i] = this.layers[i].cutLeft(); return ret.withEmptyLayersCollapsed(); }
+   intersects( otherShape, bLayerOffset ) { for ( var i = bLayerOffset; i < 4; i++ ) if ( this.layers[i].intersects( otherShape.layers[i-bLayerOffset] ) ) return true; return false; }
+   code() { return this.layers[0].b | (this.layers[1].b << 4) | (this.layers[2].b << 8) | (this.layers[3].b << 12); }
+   static fromCode( q ) { var ret = new Shape(); ret.layers[0].b = q&15; ret.layers[1].b = (q>>4)&15; ret.layers[2].b = (q>>8)&15; ret.layers[3].b = (q>>12)&15; return ret; }
+   hasFloatingLayer() { for ( var i = 0; i < 3; i++ ) if ( this.layers[i+1].b && (this.layers[i+1].b & this.layers[i].b) == 0 ) return true; return false; }
+   cloned() { var ret = new Shape(); for ( var i = 0; i < 4; i++ ) ret.layers[i] = this.layers[i]; return ret; }
+   orientated( k )    
+   {
+      var ret = this.cloned();
+      if ( k&4 ) ret = ret.flipped();
+      if ( k&2 ) ret = ret.rotated().rotated();
+      if ( k&1 ) ret = ret.rotated();
+      return ret;
+   }
+   canonicalized() 
+   {
+      var ret = this.code();
+      for ( var i = 1; i < 8; i++ )
+         ret = Math.min( ret, this.orientated( i ).code() );
+      return Shape.fromCode( ret );
+   }
+   isCanonical() 
+   {
+      return this.code() == this.canonicalized().code();
+   }
+};
+
+function bLayerOffsetForStacking( a, b )
+{
+   var bLayerOffset;
+   for ( bLayerOffset = a.numLayers() - 1; bLayerOffset >= 0; bLayerOffset-- )
+      if ( a.intersects( b, bLayerOffset ) )
+      {
+         bLayerOffset++;
+         break;
+      }
+   return Math.max( bLayerOffset, 0 );
+}
+
+// stack b onto a
+function stack( a, b )
+{
+   var ret = new Shape();
+
+   var bLayerOffset = bLayerOffsetForStacking( a, b );
+
+   for ( var i = 0; i < bLayerOffset; i++ )
+      ret.layers[i].b = a.layers[i].b;
+   for ( var i = bLayerOffset; i < 4; i++ )
+      ret.layers[i].b = a.layers[i].b | b.layers[i-bLayerOffset].b;
+
+   return ret;
+}
+
+class XY
+{
+   constructor( x, y ) { this.x = x; this.y = y; }
+   add( rhs ) { return new XY( this.x + rhs.x, this.y + rhs.y ); }
+   subtract( rhs ) { return new XY( this.x - rhs.x, this.y - rhs.y ); }
+   length() { return Math.sqrt( this.x*this.x + this.y*this.y ); }
+   mul( m ) { return new XY( this.x*m, this.y*m ); }
+   normalized() { return this.mul( 1 / this.length() ); }
+}
+
+class Rect
+{
+   constructor( pt0, pt1 ) { this._Pt0 = pt0; this._Pt1 = pt1; }
+   size() { return _Pt1.subtract( _Pt0 ); }
+   unionedWith( rhs ) 
+   { 
+      return new Rect( new XY( Math.min( this._Pt0.x, rhs._Pt0.x ), Math.min( this._Pt0.y, rhs._Pt0.y ) )
+                     , new XY( Math.max( this._Pt1.x, rhs._Pt1.x ), Math.max( this._Pt1.y, rhs._Pt1.y ) ) );
+   }
+}
+
+const OP_NONE = 0;
+const OP_RAW = 1;
+const OP_STACK = 2;
+const OP_CUT_LEFT = 3;
+const OP_CUT_RIGHT = 4;
+const OP_ROTATE_1 = 5;
+const OP_ROTATE_2 = 6;
+const OP_ROTATE_3 = 7;
+
+const SHAPEZ_BELT = 1;
+const SHAPEZ_BELT_LEFT = 2;
+const SHAPEZ_BELT_RIGHT = 3;
+const SHAPEZ_CUTTER = 9;
+const SHAPEZ_ROTATOR_1 = 11;
+const SHAPEZ_ROTATOR_2 = 13;
+const SHAPEZ_ROTATOR_3 = 12;
+const SHAPEZ_STACKER = 14;
+const SHAPEZ_TRASH = 20;
+const SHAPEZ_CONSTANT_SIGNAL = 31;
+const SHAPEZ_PRODUCER = 61;
+
+class Mapping // where does each bit end up
+{
+   constructor() 
+   {
+      this.m = new Array(16);
+      for ( var i = 0; i < 16; i++ )
+         this.m[i] = -1;
+   }
+
+   static identity() {
+      var ret = new Mapping();
+      for ( var i = 0; i < 16; i++ )
+         ret.m[i] = i;
+      return ret;
+   }
+
+   //int operator[]( int idx ) const { return idx >= 0 && idx < 16 ? m[idx] : -1; }
+   at( idx ) { return idx >= 0 && idx < 16 ? this.m[idx] : -1; }
+
+   composedWith( rhs )
+   {
+      var ret = new Mapping();
+      for ( var i = 0; i < 16; i++ )
+         ret.m[i] = this.at(rhs.at(i));
+      return ret;
+   }
+};
+
+class Recipe
+{   
+   constructor()
+   {
+      this.a = 0;
+      this.b = 0;
+      this.op = OP_NONE;
+   }
+
+   mappingForA()
+   {
+      if ( this.op == OP_RAW ) 
+      {
+         var ret = new Mapping();
+         for ( var i = 0; i < 16; i++ )
+            ret.m[i] = i;
+         return ret;
+      }
+      if ( this.op == OP_STACK )
+      {
+         return Mapping.identity();
+      }
+      if ( this.op == OP_CUT_LEFT || this.op == OP_CUT_RIGHT )
+      {
+         var shape = Shape.fromCode( this.a );
+
+         var mask = OP_CUT_LEFT ? 12 : 3;
+
+         var layerHasSomething = [
+            ((shape.layers[0].b & mask) ? 1 : 0),
+            ((shape.layers[1].b & mask) ? 1 : 0),
+            ((shape.layers[2].b & mask) ? 1 : 0),
+            ((shape.layers[3].b & mask) ? 1 : 0)
+         ];
+
+         var layerMapping = [
+            0,
+            layerHasSomething[0],
+            layerHasSomething[0] + layerHasSomething[1],
+            layerHasSomething[0] + layerHasSomething[1] + layerHasSomething[2]
+         ];
+
+         var side = this.op == OP_CUT_LEFT ? 2 : 0;
+
+         var ret = new Mapping();
+         for ( var i = 0; i < 16; i++ )
+            ret.m[i] = layerHasSomething[Math.floor(i/4)] && ((i & 2) == side) ? layerMapping[Math.floor(i/4)]*4 + (i&3) : -1;
+         //console.log( ret );
+         return ret;
+      }
+
+      var rotateMapping = new Mapping();
+      for ( var i = 0; i < 16; i++ )
+         rotateMapping.m[i] = ((i+1)&3) | (i&12);
+
+      if ( this.op == OP_ROTATE_1 )
+         return rotateMapping;
+      if ( this.op == OP_ROTATE_2 )
+         return rotateMapping.composedWith( rotateMapping );
+      if ( this.op == OP_ROTATE_3 )
+         return rotateMapping.composedWith( rotateMapping ).composedWith( rotateMapping );
+
+      throw 777;
+   }
+
+   mappingForB()
+   {
+      var bLayerOffset = bLayerOffsetForStacking( Shape.fromCode( this.a ), Shape.fromCode( this.b ) );
+      if ( this.op == OP_STACK )
+      {
+         var ret = new Mapping();
+         for ( var i = 0; i < 16; i++ )
+            ret.m[i] = i + bLayerOffset*4;
+         return ret;
+      }
+      throw 777;
+   }
+};
+
+function buildingSize( type )
+{
+   if ( type == SHAPEZ_CUTTER ) return new XY(2,1);
+   if ( type == SHAPEZ_STACKER ) return new XY(2,1);
+   return new XY(1,1);
+}
+
+class Building
+{
+   constructor( type, pos, rotation )
+   {
+      this._Type = type;
+      this._Pos = pos;
+      this._Rotation = rotation;
+   }
+   toJson()
+   {
+      var j = String.raw`{"components":{"StaticMapEntity":{"origin":{"x":~X~,"y":~Y~},"rotation":~ROTATION~,"originalRotation":0,"code":~CODE~}~EXTRA_JSON~}}`;
+      j = j.replace( "~X~", this._Pos.x.toString() );
+      j = j.replace( "~Y~", this._Pos.y.toString() );
+      j = j.replace( "~ROTATION~", (this._Rotation*90).toString() );
+      j = j.replace( "~CODE~", this._Type.toString() );
+      j = j.replace( "~EXTRA_JSON~", this.extraJson() );
+      return j;
+   }
+   extraJson()
+   {
+      return "";
+   }
+   clone( offset )
+   {
+      return new Building( this._Type, this._Pos.add( offset ), this._Rotation );
+   }
+   rect() 
+   { 
+      var sz = buildingSize( this._Type );
+      if ( this._Rotation == 0 ) return new Rect( this._Pos, this._Pos.add( sz ) ); 
+      if ( this._Rotation == 1 ) return new Rect( new XY( this._Pos.x-sz.y+1, this._Pos.y ), new XY( this._Pos.x+1, this._Pos.y+sz.x ) ); 
+      if ( this._Rotation == 2 ) return new Rect( this._Pos.subtract( sz ).add( new XY(1,1) ), this._Pos.add( new XY(1,1) ) ); 
+      if ( this._Rotation == 3 ) return new Rect( new XY( this._Pos.x, this._Pos.y-sz.x+1 ), new XY( this._Pos.x+sz.y, this._Pos.y+1 ) );
+      throw 777;
+   }
+};
+
+
+class ConstantShapeSignal extends Building
+{
+   constructor( shape, code, pos, rotation ) 
+   {
+      if ( !rotation )
+         rotation = 0;
+      super( SHAPEZ_CONSTANT_SIGNAL, pos, rotation );
+      this._Shape = shape;
+      this._Code = code;
+   }
+   extraJson()
+   {
+      var j = String.raw`,"ConstantSignal":{"signal":{"$":"shape","data":"~SHAPE_CODE~"}}`;
+      j = j.replace( "~SHAPE_CODE~", this._Code );
+      return j;
+   }
+   clone( offset )
+   {
+      return new ConstantShapeSignal( this._Shape, this._Code, this._Pos.add( offset ), this._Rotation );
+   }
+};
+
+
+function codeForShape( shape, finalTarget, mapping )
+{
+   var ret = "";
+   for ( var layer = 0; layer < shape.numLayers(); layer++ )
+   {
+      if ( layer > 0 )
+         ret += ":";
+      for ( var b = 0; b < 4; b++ )
+      {
+         var targetIdx = mapping.at(layer*4+b);
+         if ( !(shape.layers[layer].b & (1<<b)) )
+            ret += "--";
+         else
+            ret += targetIdx >= 0 ? finalTarget.substr( targetIdx*2 + Math.floor(targetIdx/4), 2 ) : "Cu";
+      }
+   }
+   return ret;
+}
+
+
+class BluePrint
+{
+   constructor()
+   {
+      this._Buildings = [];
+   }
+   addBuilding( building )
+   {
+      this._Buildings.push( building );
+   }
+   addBluePrint( bp, offset )
+   {
+      for ( var i = 0; i < bp._Buildings.length; i++ )
+         this.addBuilding( bp._Buildings[i].clone( offset ) );
+   }
+   rect()
+   {
+      var ret = new Rect( new XY(9999,9999), new XY(-9999,-9999) );
+      for ( var i = 0; i < this._Buildings.length; i++ )
+         ret = ret.unionedWith( this._Buildings[i].rect() );
+      return ret;
+   }
+   toJson()
+   {
+      var ss = "[\n";
+      var first = true;
+      for ( var i = 0; i < this._Buildings.length; i++ )
+      {
+         ss += (first?"":",") + this._Buildings[i].toJson() + "\n";
+         first = false;
+      }
+      ss += "]\n";
+      return ss;
+   }
+};
+
+function opStr( op )
+{
+   if ( op == OP_RAW ) return "RAW";
+   if ( op == OP_STACK ) return "STACK";
+   if ( op == OP_CUT_LEFT ) return "CUT_LEFT";
+   if ( op == OP_CUT_RIGHT ) return "CUT_RIGHT";
+   if ( op == OP_ROTATE_1 ) return "ROTATE_1";
+   if ( op == OP_ROTATE_2 ) return "ROTATE_2";
+   if ( op == OP_ROTATE_3 ) return "ROTATE_3";
+   return "UNKNOWN-OP";
+}
+
+function diagramOpStr( op )
+{
+   if ( op == OP_RAW ) return "";
+   if ( op == OP_STACK ) return "stack";
+   if ( op == OP_CUT_LEFT ) return "cut";
+   if ( op == OP_CUT_RIGHT ) return "cut";
+   if ( op == OP_ROTATE_1 ) return "rotate";
+   if ( op == OP_ROTATE_2 ) return "rotate";
+   if ( op == OP_ROTATE_3 ) return "rotate";
+   return "UNKNOWN-OP";
+}
+
+function shapeFromCode( code )
+{
+   var shape = new Shape();
+   for ( var layer = 0; layer < 4; layer++ )
+   {
+      for ( var b = 0; b < 4; b++ )
+      {
+         var strIndex = layer*9 + b*2;
+         if ( strIndex+2 <= code.length && code.substr( strIndex, 2 ) != "--" )
+            shape.layers[layer].b |= 1 << b;
+      }
+   }
+
+   return shape;
+}
+
+
+class Recipes
+{
+   constructor()
+   {
+   }
+   
+   loadFromBinary( data )
+   {
+      this._Recipes = [];
+      for ( var i = 0; i < (1<<16); i++ )
+      {
+         var recipe = new Recipe();
+         recipe.a = data[i*5+1]*256 + data[i*5+0];
+         recipe.b = data[i*5+3]*256 + data[i*5+2];
+         recipe.op = data[i*5+4];
+         this._Recipes[i] = recipe;
+      }
+   }
+
+   at( index ) { return this._Recipes[index]; }
+   
+   isPossible( index ) { return this.at( index ).op != OP_NONE; }
+
+   recipeTreeFor( shape, prefix )
+   {
+      var ss = "";
+      var recipe = this._Recipes[shape.code()];
+      ss += prefix + shape.str() + " " + opStr( recipe.op ) + "\n";
+      if ( recipe.a )
+         ss += this.recipeTreeFor( Shape.fromCode( recipe.a ), prefix + "  " );
+      if ( recipe.b )
+         ss += this.recipeTreeFor( Shape.fromCode( recipe.b ), prefix + "  " );
+      return ss; 
+   }
+
+   bluePrintFor( shape, finalTarget, mapping )
+   {
+      if ( !finalTarget )
+      {
+         finalTarget = shape;
+         return this.bluePrintFor( shapeFromCode( finalTarget ), finalTarget, Mapping.identity() );
+      }
+    
+      var ret = new BluePrint();
+
+      var recipe = this._Recipes[shape.code()];
+      if ( recipe.op == OP_RAW )
+      {
+         ret.addBuilding( new Building( SHAPEZ_BELT, new XY(0,0), 0 ) );
+         ret.addBuilding( new Building( SHAPEZ_BELT, new XY(0,1), 0 ) );
+         ret.addBuilding( new Building( SHAPEZ_BELT, new XY(0,2), 0 ) );
+         ret.addBuilding( new Building( SHAPEZ_BELT, new XY(0,3), 0 ) );
+         ret.addBuilding( new Building( SHAPEZ_PRODUCER, new XY(0,4), 0 ) );
+         ret.addBuilding( new ConstantShapeSignal( shape, codeForShape( shape, finalTarget, mapping ), new XY(0,5), 0 ) );
+      }
+      if ( recipe.op == OP_STACK )
+      {
+         ret.addBuilding( new Building( SHAPEZ_STACKER, new XY(0,0), 0 ) );
+         var a = this.bluePrintFor( Shape.fromCode( recipe.a ), finalTarget, mapping.composedWith( recipe.mappingForA() ) );
+         var b = this.bluePrintFor( Shape.fromCode( recipe.b ), finalTarget, mapping.composedWith( recipe.mappingForB() ) );
+
+         var bx = a.rect()._Pt1.x;
+         ret.addBluePrint( a, new XY(0,2) );
+         ret.addBluePrint( b, new XY(bx,2) );
+         ret.addBuilding( new Building( SHAPEZ_BELT, new XY(0,1), 0 ) );
+
+         if ( bx == 1 )
+         {
+            ret.addBuilding( ( new Building( SHAPEZ_BELT, new XY(bx,1), 0 ) ) );
+         }
+         else
+         {
+            ret.addBuilding( ( new Building( SHAPEZ_BELT_RIGHT, new XY(1,1), 3 ) ) );
+            for ( var x = 2; x < bx; x++ )
+               ret.addBuilding( ( new Building( SHAPEZ_BELT, new XY(x,1), 3 ) ) );
+            ret.addBuilding( ( new Building( SHAPEZ_BELT_LEFT, new XY(bx,1), 0 ) ) );
+         }
+      }
+      if ( recipe.op == OP_CUT_LEFT || recipe.op == OP_CUT_RIGHT )
+      {
+         ret.addBuilding( ( new Building( SHAPEZ_CUTTER, new XY(0,2), 0 ) ) );
+         ret.addBuilding( ( new Building( SHAPEZ_TRASH, recipe.op == OP_CUT_LEFT ? new XY(1,1) : new XY(0,1), 0 ) ) );
+         if ( recipe.op == OP_CUT_LEFT )
+         {
+            ret.addBuilding( ( new Building( SHAPEZ_BELT, new XY(0,0), 0 ) ) );
+            ret.addBuilding( ( new Building( SHAPEZ_BELT, new XY(0,1), 0 ) ) );
+         }
+         else
+         {
+            ret.addBuilding( ( new Building( SHAPEZ_BELT_RIGHT, new XY(0,0), 3 ) ) );
+            ret.addBuilding( ( new Building( SHAPEZ_BELT_LEFT, new XY(1,0), 0 ) ) );
+            ret.addBuilding( ( new Building( SHAPEZ_BELT, new XY(1,1), 0 ) ) );
+         }
+         var a = this.bluePrintFor( Shape.fromCode( recipe.a ), finalTarget, mapping.composedWith( recipe.mappingForA() ) );
+         ret.addBluePrint( a, new XY(0,3) );
+      }
+      if ( recipe.op == OP_ROTATE_1 || recipe.op == OP_ROTATE_2 || recipe.op == OP_ROTATE_3 )
+      {
+         var b = recipe.op == OP_ROTATE_1 ? SHAPEZ_ROTATOR_1 : recipe.op == OP_ROTATE_2 ? SHAPEZ_ROTATOR_2 : SHAPEZ_ROTATOR_3;
+         ret.addBuilding( ( new Building( b, new XY(0,0), 0 ) ) );
+         var a = this.bluePrintFor( Shape.fromCode( recipe.a ), finalTarget, mapping.composedWith( recipe.mappingForA() ) );
+         ret.addBluePrint( a, new XY(0,1) );
+      }
+
+      return ret;
+   }
+   visit( visitor, shape, finalTarget, mapping )
+   {   
+      if ( !finalTarget )
+      {
+         finalTarget = shape;
+         var rootItem = this.visit( visitor, shapeFromCode( finalTarget ), finalTarget, Mapping.identity() );
+         visitor.onDoneVisiting( rootItem );
+         return rootItem;
+      }
+      
+      var recipe = this._Recipes[shape.code()];          
+      
+      var children = [];
+      if ( recipe.a )
+         children.push( this.visit( visitor, Shape.fromCode( recipe.a ), finalTarget, mapping.composedWith( recipe.mappingForA() ) ) );
+      if ( recipe.b )
+         children.push( this.visit( visitor, Shape.fromCode( recipe.b ), finalTarget, mapping.composedWith( recipe.mappingForB() ) ) );
+         
+      //console.log( recipe.a, recipe.b, children );
+            
+      return visitor.visit( codeForShape( shape, finalTarget, mapping ), recipe.op, children );
+   }
+};
+
+function addShortenedLine( context, pt0, pt1, shortenAmt )
+{
+   var distance = pt1.subtract( pt0 ).length();
+   if ( shortenAmt*2 >= distance )
+      return;
+   var s = pt1.subtract( pt0 ).normalized().mul( shortenAmt );
+   var newPt0 = pt0.add( s );
+   var newPt1 = pt1.subtract( s );
+   context.moveTo(newPt0.x, newPt0.y);
+   context.lineTo(newPt1.x, newPt1.y);
+}
+
+const SHAPE_SIZE = 64;    
+const LABEL_HEIGHT = 12;  
+const VERTICAL_MARGIN = 12; 
+const HORIZONTAL_MARGIN = 12;      
+class DiagramItem
+{
+   constructor( code, op, children )
+   {
+      this.code = code;
+      this.op = op;
+      this.children = children;     
+   }
+   selfSize()
+   {
+      return new XY( SHAPE_SIZE + HORIZONTAL_MARGIN, SHAPE_SIZE + LABEL_HEIGHT + VERTICAL_MARGIN );
+   }
+   calcSize()
+   {
+      if ( this.cachedSize )
+         return this.cachedSize; 
+   
+      var sizeForSelf = this.selfSize();
+      
+      var sizeForChildren = new XY( 0, 0 );
+      for ( var i = 0; i < this.children.length; i++ )
+      {
+         var child = this.children[i];
+         sizeForChildren.x += child.calcSize().x;
+         sizeForChildren.y = Math.max( sizeForChildren.y, child.calcSize().y );
+      }
+      
+      var size = new XY( Math.max( sizeForSelf.x, sizeForChildren.x ), sizeForSelf.y + sizeForChildren.y );
+      return this.cachedSize = size;
+   }
+   draw( context )
+   {
+      context.save();
+      //console.log( this.code, this.op, this.children );
+      //var rect = new Rect();
+      
+      
+      
+      var shapePos = new XY( this.calcSize().x/2, SHAPE_SIZE/2 );
+      
+      
+      context.lineWidth = 5;
+      context.strokeStyle = "rgba(40, 50, 65, 0.1)";
+      var totalX = 0;
+      for ( var i = 0; i < this.children.length; i++ )
+      {
+         var child = this.children[i];
+                  
+         context.beginPath();
+         addShortenedLine( context, shapePos, new XY( totalX+child.calcSize().x/2, shapePos.y+this.selfSize().y ), SHAPE_SIZE*.48 );
+         context.stroke();
+         //child.draw( context );
+         //context.translate( child.calcSize().x, 0 );
+         totalX += child.calcSize().x;
+      }
+      
+      
+      renderShape( context, fromShortKey( this.code ), shapePos, SHAPE_SIZE );
+      context.font = "12px Arial";
+      context.textAlign = "center";
+      context.fillText( diagramOpStr( this.op ), shapePos.x, shapePos.y + SHAPE_SIZE/2 + LABEL_HEIGHT); 
+      
+      context.translate( 0, this.selfSize().y );
+      for ( var i = 0; i < this.children.length; i++ )
+      {
+         var child = this.children[i];
+         child.draw( context );
+         context.translate( child.calcSize().x, 0 );
+      }
+
+            
+      context.restore();
+   }
+   
+}
+
+class Diagram
+{
+   constructor()
+   {
+   }
+   visit( shape, op, children )
+   {
+      return new DiagramItem( shape, op, children );
+   }
+   onDoneVisiting( rootItem )
+   {
+      this.rootItem = rootItem;
+      var size = rootItem.calcSize();
+   }
+   draw( context )
+   {
+      this.rootItem.draw( context );
+   }
+}
+
+var g_recipes;
+
+function onRecipesLoaded( arrayBuffer )
+{
+   console.log( "recipes loaded..." );
+   //console.log( arrayBuffer );
+   var recipeData = new Uint8Array(arrayBuffer);
+    
+   g_recipes = new Recipes();
+   g_recipes.loadFromBinary( recipeData );
+     
+   ////var rt = recipes.recipeTreeFor( shapeFromCode( "Cu------:--Cu----" ), "" );
+   //var rt = recipes.recipeTreeFor( shapeFromCode( "Cu------" ), "" );
+   //console.log( rt );
+   //
+   //
+   //var bp = recipes.bluePrintFor( "CbCuCbCu:Sr------:--CrSrCr:CwCwCwCw" );
+   ////var bp = recipes.bluePrintFor( "Cr------:--Cr----" );
+   //console.log( bp.toJson() );
+      
+  document.getElementById("download_status").innerHTML = "solver is ready!";
+  document.getElementById("code").disabled = false;
+}
+
+function load_binary_resource(file) 
+{
+  var request = new XMLHttpRequest();
+  request.open("GET", file);
+  request.responseType = 'arraybuffer';
+  request.onreadystatechange = function() {
+    if ( request.readyState == 4 )
+      onRecipesLoaded(request.mozResponseArrayBuffer || request.response);
+  }
+  request.send();
+}
+
+function onPageLoad() {
+  document.getElementById("code").disabled = true;
+  load_binary_resource("recipes_0_1_1.bin");
+}
+
+var g_code;
+function copyBluePrintToClipboard()
+{
+   var blueprint = g_recipes.bluePrintFor( g_code ).toJson();
+   navigator.clipboard.writeText( blueprint );
+}
+
+function onSolveButtonPressed()
+{   
+   showError(null);
+   // @ts-ignore
+   const code = document.getElementById("code").value.trim();
+   
+   let parsed = null;
+   try {
+     parsed = fromShortKey(code);
+   } catch (ex) {
+     showError(ex);
+     return;
+   }
+   
+   renderShapeToResultDiv(parsed, 128);
+   
+   
+   //var rt = g_recipes.recipeTreeFor( shapeFromCode( code ), "" );
+   //console.log( rt );
+   
+   //var bp = g_recipes.bluePrintFor( code );
+   //console.log( bp.toJson() );
+   
+   
+   
+   
+   if ( !g_recipes.isPossible( shapeFromCode( code ).code() ) )
+   {
+      var impossibleText = document.getElementById('impossibleText');
+      impossibleText.textContent = code + "\nis impossible!";
+      document.getElementById("impossibleDiv").classList.remove("hidden");
+      document.getElementById("resultsDiv").classList.add("hidden");
+      return;
+   }
+   document.getElementById("impossibleDiv").classList.add("hidden");
+   document.getElementById("resultsDiv").classList.remove("hidden");
+   
+   // draw diagram
+   {
+      document.getElementById("diagramDiv").innerHTML = '';
+   
+      var diagram = new Diagram();
+      g_recipes.visit( diagram, code );
+      
+      var canvas = document.createElement('canvas');
+      canvas.width = diagram.rootItem.calcSize().x
+      canvas.height = diagram.rootItem.calcSize().y
+      const context = canvas.getContext("2d");
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      document.getElementById("diagramDiv").appendChild( canvas );
+      
+      diagram.draw( context );
+   }
+   
+   // blueprint
+   {
+      g_code = code;
+   }
+   
+   // recipe in text form
+   {
+      //var recipeTree = document.createElement('p');
+      //recipeTree.setAttribute('style', 'white-space: pre; font-family: Consolas;');
+      //recipeTree.textContent = "In text form:\n\n" + g_recipes.recipeTreeFor( shapeFromCode( code ), "" );
+      //document.getElementById("resultsDiv").appendChild( recipeTree );
+      recipeTreeText.textContent = "In text form:\n\n" + g_recipes.recipeTreeFor( shapeFromCode( code ), "" );
+   }
+}
+
+window.onload = function() { onPageLoad(); };
+</script>
+
+</body>
+</html>
