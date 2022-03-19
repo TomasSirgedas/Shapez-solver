@@ -642,7 +642,7 @@ class Recipe
       {
          var shape = Shape.fromCode( this.a );
 
-         var mask = OP_CUT_LEFT ? 12 : 3;
+         var mask = this.op == OP_CUT_LEFT ? 12 : 3;
 
          var layerHasSomething = [
             ((shape.layers[0].b & mask) ? 1 : 0),
