@@ -8,21 +8,35 @@ body {
 .hidden {
    display: none;
 }
+.inlineBlock {
+   display: inline-block;
+}
 </style>
 </head>
 <body>
 
-
+<div class="inlineBlock">
 <h3><p>Shapez.io solver</p></h3>
-<p><input type="text" id="code" value="--Ry--Rr:SgRgSyCu" size="40"><br><br><p>
+<p><input type="text" id="code" value="--Rr----:Rg----Rb:Rp--Ry--:RcRw----" size="40"><br><br><p>
 <!-- <p><input type="text" id="code" value="----Ry--"><br><br><p> -->
+</div>
+
+<div class="inlineBlock">
+<div class="hidden"><!--these options don't seem to affect the output?-->
+<input type="radio" id="min_cuts" name="optimize_option" onclick="onSolverOptionChanged();"><label for="min_cuts">Minimize cuts</label><br>
+<input type="radio" id="min_stacks" name="optimize_option" onclick="onSolverOptionChanged();"><label for="min_stacks">Minimize stacks</label><br>
+<input type="radio" id="min_cuts_stacks" name="optimize_option" checked="checked" onclick="onSolverOptionChanged();"><label for="min_cuts_stacks">Minimize cuts+stacks</label><br>
+</div>
+<input type="checkbox" id="single_layer_source" name="single_layer_source" onclick="onSolverOptionChanged();"><label for="single_layer_source">Any single layer can be source</label><br>
+</div>
+
 <div id="error" class="hasError"></div>
 <div id="resultWrapper">
     <canvas id="result" width="128" height="128"></canvas>
 </div>
 
-<p id="download_status">... still downloading ...</p>
 <button onclick="onSolveButtonPressed()">Solve</button>
+<div id="download_status" class="inlineBlock">... still downloading ...</div>
 
 <div id="resultsDiv" class="hidden">
 <div id="diagramDiv"></div>
@@ -1128,6 +1142,9 @@ function onRecipesLoaded( arrayBuffer )
 
 function load_binary_resource(file) 
 {
+  document.getElementById("download_status").innerHTML = "... still downloading ...";
+  document.getElementById("code").disabled = true;
+
   var request = new XMLHttpRequest();
   request.open("GET", file);
   request.responseType = 'arraybuffer';
@@ -1138,9 +1155,19 @@ function load_binary_resource(file)
   request.send();
 }
 
+function onSolverOptionChanged()
+{
+  var cut_cost = document.getElementById("min_stacks").checked ? 9 : 1;
+  var stack_cost = document.getElementById("min_cuts").checked ? 9 : 1;
+  var singleLayerIsRaw = document.getElementById("single_layer_source").checked;
+  var filename = "recipes_0_" + cut_cost + "_" + stack_cost + (singleLayerIsRaw?"r":"") + ".bin";
+  load_binary_resource( filename );
+}
+
 function onPageLoad() {
   document.getElementById("code").disabled = true;
-  load_binary_resource("recipes_0_1_1.bin");
+  //load_binary_resource("recipes_0_1_1.bin");
+  onSolverOptionChanged();
 }
 
 var g_code;
